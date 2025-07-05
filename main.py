@@ -1,90 +1,79 @@
-from flask import Flask, render_template, request
-import joblib
-import pandas as pd
-from model import all_symptoms_list  # Import symptom list
+"""Primary application entrypoint.
+"""
+import locale
+import logging
+import os
+import sys
+import warnings
+from typing import List, Optional
 
-app = Flask(__name__)
+from pip._internal.cli.autocompletion import autocomplete
+from pip._internal.cli.main_parser import parse_command
+from pip._internal.commands import create_command
+from pip._internal.exceptions import PipError
+from pip._internal.utils import deprecation
 
-# ✅ Load model and expected column names
-model, expected_columns = joblib.load('random_forest_model.pkl')
+logger = logging.getLogger(__name__)
 
-# ✅ Function to handle blood sugar parsing
-def parse_blood_sugar(value):
+
+# Do not import and use main() directly! Using it directly is actively
+# discouraged by pip's maintainers. The name, location and behavior of
+# this function is subject to change, so calling it directly is not
+# portable across different pip versions.
+
+# In addition, running pip in-process is unsupported and unsafe. This is
+# elaborated in detail at
+# https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program.
+# That document also provides suggestions that should work for nearly
+# all users that are considering importing and using main() directly.
+
+# However, we know that certain users will still want to invoke pip
+# in-process. If you understand and accept the implications of using pip
+# in an unsupported manner, the best approach is to use runpy to avoid
+# depending on the exact location of this entry point.
+
+# The following example shows how to use runpy to invoke pip in that
+# case:
+#
+#     sys.argv = ["pip", your, args, here]
+#     runpy.run_module("pip", run_name="__main__")
+#
+# Note that this will exit the process after running, unlike a direct
+# call to main. As it is not safe to do any processing after calling
+# main, this should not be an issue in practice.
+
+
+def main(args: Optional[List[str]] = None) -> int:
+    if args is None:
+        args = sys.argv[1:]
+
+    # Suppress the pkg_resources deprecation warning
+    # Note - we use a module of .*pkg_resources to cover
+    # the normal case (pip._vendor.pkg_resources) and the
+    # devendored case (a bare pkg_resources)
+    warnings.filterwarnings(
+        action="ignore", category=DeprecationWarning, module=".*pkg_resources"
+    )
+
+    # Configure our deprecation warnings to be sent through loggers
+    deprecation.install_warning_logger()
+
+    autocomplete()
+
     try:
-        if '-' in value:
-            low, high = map(int, value.split('-'))
-            return (low + high) / 2
-        elif value.startswith('<'):
-            return float(value[1:]) - 1
-        elif value.startswith('>'):
-            return float(value[1:]) + 1
-        return float(value)
-    except Exception:
-        return 0.0
+        cmd_name, cmd_args = parse_command(args)
+    except PipError as exc:
+        sys.stderr.write(f"ERROR: {exc}")
+        sys.stderr.write(os.linesep)
+        sys.exit(1)
 
-# ✅ Preprocess user input into model-ready DataFrame
-def preprocess_input(raw_input, expected_columns):
-    df = pd.DataFrame([raw_input])
-    df = pd.get_dummies(df)
-
-    # Ensure all expected columns exist
-    for col in expected_columns:
-        if col not in df.columns:
-            df[col] = 0
-
-    df = df[expected_columns]
-    return df
-
-@app.route('/')
-def welcome():
-    return render_template('perumale.html')
-
-@app.route('/questions')
-def questions():
-    return render_template('questions.html')
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    print("✅ Received POST /predict")
-
+    # Needed for locale.getpreferredencoding(False) to work
+    # in pip._internal.utils.encoding.auto_decode
     try:
-        form_data = request.form.to_dict()
-        print("Form data:", form_data)
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error as e:
+        # setlocale can apparently crash if locale are uninitialized
+        logger.debug("Ignoring error %s when setting locale", e)
+    command = create_command(cmd_name, isolated=("--isolated" in cmd_args))
 
-        # ✅ Get selected symptoms
-        symptoms_selected = request.form.getlist('symptoms[]')
-        print("Symptoms selected:", symptoms_selected)
-
-        # ✅ Create binary symptom vector
-        symptom_vector = {symptom: 1 if symptom in symptoms_selected else 0 for symptom in all_symptoms_list}
-
-        # ✅ Core features
-        input_data = {
-            'age': int(form_data.get('age', 0)),
-            'gender': form_data.get('gender', ''),
-            'alcohol': form_data.get('alcohol', ''),
-            'smoker': form_data.get('smoker', ''),
-            'blood_sugar': parse_blood_sugar(form_data.get('blood_sugar', '0')),
-            'bp_range': form_data.get('bp_range', '')
-        }
-
-        # ✅ Merge symptoms
-        input_data.update(symptom_vector)
-
-        # ✅ Preprocess and predict
-        input_df = preprocess_input(input_data, expected_columns)
-
-        print("✅ Final input to model:\n", input_df.head())
-
-        prediction = model.predict(input_df)[0]
-        print("✅ Prediction result:", prediction)
-
-        return render_template('dashboard.html', prediction=prediction)
-
-    except Exception as e:
-        print("❌ ERROR:", e)
-        return "Something went wrong while processing your request.", 500
-
-if __name__ == '__main__':
-    app.run(debug=True)
-
+    return command.main(cmd_args)
